@@ -1,6 +1,6 @@
-# Automating Azure Cost Management with PowerShell, Bicep, and Log Analytics
+# Azure Budget Guardian: Automated Budget vs. Actual Cost Management Solution
 
-Managing costs in Azure can be challenging, especially when you're dealing with multiple subscriptions. This solution helps you build an automated cost management system using PowerShell, Bicep, Azure Automation, and Log Analytics.
+Gain complete visibility and control over your Azure spending with this automated solution that tracks actual costs against budgets across all your subscriptions. Using PowerShell, Bicep, and Log Analytics, this system helps you monitor spending trends, identify budget overruns, and optimize your cloud investments—all with zero maintenance.
 
 The solution collects daily cost data across all your subscriptions, compares it against budgets, and stores everything in a Log Analytics workspace for easy reporting and visualization. The best part? It's completely automated and secure, using managed identities instead of credentials.
 
