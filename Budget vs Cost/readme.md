@@ -4,6 +4,48 @@ Gain complete visibility and control over your Azure spending with this automate
 
 The solution collects daily cost data across all your subscriptions, compares it against budgets, and stores everything in a Log Analytics workspace for easy reporting and visualization. The best part? It's completely automated and secure, using managed identities instead of credentials.
 
+## Current Challenges in Azure Cost Management
+
+Organizations operating in Azure often face several significant challenges when trying to monitor and control their cloud spending:
+
+### Fragmented Budget Visibility
+
+Azure's native budgeting functionality operates at the individual management group, subscription or resource group level, there is also a significant difference in reporting capacilities between Enterprise Agreements, CSP & PAYG commitments, making it difficult to:
+
+- Get a centralized view of all budgets across multiple subscriptions
+- Track overall organizational spending against planned budgets
+- Generate a unified report showing budget compliance across the entire environment
+
+### Limited Budget vs. Actual Reporting
+
+While Azure Cost Management provides actual cost data, there are key limitations:
+
+- No built-in dashboards that effectively compare budget vs. actual spending across subscriptions
+- Missing historical trending of budget compliance over time
+- Limited options for automated alerting based on budget-to-actual ratios
+
+### Manual Processes and Data Silos
+
+Without a custom solution, organizations typically resort to:
+
+- Manually exporting data from multiple subscriptions
+- Creating spreadsheets to combine budget and actual costs
+- Building ad-hoc reporting that requires regular maintenance
+- Developing separate processes for alerting when budgets are approached
+
+### Delayed Insights and Reaction Time
+
+The manual nature of cross-subscription budget monitoring leads to:
+
+- Discovering budget overruns days or weeks after they occur
+- Slow reaction time to spending anomalies
+- Inability to proactively adjust resources before budgets are exceeded
+- Difficulties in attributing costs to specific teams or projects
+
+This solution addresses these challenges by providing an automated, centralized system that collects both budget and actual cost data across all subscriptions, compares them in real-time, and makes this information accessible through customizable dashboards and alerts.
+
+
+
 ## What We're Building
 
 The solution consists of:
