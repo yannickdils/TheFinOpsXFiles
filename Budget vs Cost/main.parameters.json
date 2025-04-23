@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "westeurope"
+    },
+    "tags": {
+      "value": {}
+    },
+    "resourceGroupName": {
+      "value": "rg-management-hub-finops-weu-001"
+    },
+    "automationAccountName": {
+      "value": "aa-finops-hub-log-weu-001"
+    },
+    "logAnalyticsWorkspaceName": {
+      "value": "log-management-hub-finops-weu-001"
+    },
+    "dcrName": {
+      "value": "dcr-finops-hub-cost-weu-001"
+    }
+  }
+}
