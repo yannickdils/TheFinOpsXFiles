@@ -72,6 +72,14 @@ resource customTable 'Microsoft.OperationalInsights/workspaces/tables@2022-10-01
           type: 'string'
         }
         {
+          name: 'ManagementGroup'
+          type: 'string'
+        }
+        {
+          name: 'ManagementGroupPath'
+          type: 'string'
+        }
+        {
           name: 'SubscriptionName'
           type: 'string'
         }

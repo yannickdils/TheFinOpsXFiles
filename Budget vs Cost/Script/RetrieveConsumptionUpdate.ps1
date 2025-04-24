@@ -51,66 +51,398 @@ foreach ($sub in $subs) {
     # Set context to current subscription
     Set-AzContext -SubscriptionId $sub.Id | Out-Null
     
+    # Initialize management group variables with default values
+    $mgmtGroup = "No Data"
+    $mgmtGroupPath = "No Data"
+    
+    # Get management group information for this subscription
+    try {
+        Write-Output "Getting management group for subscription: $($sub.Name)"
+        
+        # First, try to get the management groups the subscription is directly assigned to
+        $subDetail = Get-AzSubscription -SubscriptionId $sub.Id -ErrorAction SilentlyContinue
+        $mgmtGroupId = $subDetail.ManagedByTenants.TenantId
+        
+        if ($mgmtGroupId) {
+            Write-Output "Found management group ID: $mgmtGroupId"
+            
+            try {
+                # Try to get details of this management group
+                $mgmtGroupDetail = Get-AzManagementGroup -GroupId $mgmtGroupId -ErrorAction SilentlyContinue
+                if ($mgmtGroupDetail) {
+                    $mgmtGroup = $mgmtGroupDetail.DisplayName
+                    $mgmtGroupPath = $mgmtGroupDetail.DisplayName
+                    Write-Output "Found management group: $mgmtGroup"
+                }
+            } catch {
+                Write-Output "Error getting management group details: $_"
+            }
+        } else {
+            # Alternative approach - list all subscriptions in all management groups
+            try {
+                # Get root management group first
+                $rootGroup = Get-AzManagementGroup -ErrorAction SilentlyContinue | 
+                    Where-Object { $_.Name -eq "Tenant Root Group" -or $_.Name -eq $sub.TenantId }
+                
+                if ($rootGroup) {
+                    # Then check all management groups
+                    $allGroups = Get-AzManagementGroup -Expand -Recurse -ErrorAction SilentlyContinue
+                    
+                    foreach ($group in $allGroups) {
+                        # Look for our subscription ID in the children
+                        $children = Get-AzManagementGroup -GroupId $group.Name -Expand -ErrorAction SilentlyContinue
+                        
+                        if ($children -and $children.Children) {
+                            $found = $children.Children | Where-Object { 
+                                $_.Type -eq "Microsoft.Management/managementGroups/subscriptions" -and 
+                                $_.Name -eq $sub.Id 
+                            }
+                            
+                            if ($found) {
+                                $mgmtGroup = $group.DisplayName
+                                $mgmtGroupPath = $group.DisplayName
+                                Write-Output "Found management group through children: $mgmtGroup"
+                                break
+                            }
+                        }
+                    }
+                }
+            } catch {
+                Write-Output "Error searching management groups: $_"
+            }
+        }
+        
+        if ($mgmtGroup -eq "No Data") {
+            Write-Output "No management group found for this subscription"
+        }
+    } catch {
+        Write-Output "Error retrieving management group (continuing anyway): $_"
+    }
+    
     try {
         # Get cost for specified period
         Write-Output "Retrieving cost data for the past $DaysToAnalyze days..."
         $startDate = $now.AddDays(-$DaysToAnalyze)
         Write-Output "Date range: $startDate to $now"
         
-        $costDetails = Get-AzConsumptionUsageDetail -StartDate $startDate -EndDate $now -ErrorAction Stop
+        $totalCost = 0
+        $costRetrievalSuccessful = $false
         
-        if ($costDetails -and $costDetails.Count -gt 0) {
-            Write-Output "Retrieved $($costDetails.Count) cost line items"
-            $totalCost = $costDetails | Measure-Object -Property PretaxCost -Sum | Select-Object -ExpandProperty Sum
-            Write-Output "Total cost: $totalCost"
-        } else {
-            Write-Output "No cost data found for the specified period"
+        # Try multiple cost data retrieval methods, starting with the most reliable
+        
+        # Method 1: Direct REST API approach (works for both CSP and EA)
+        if (-not $costRetrievalSuccessful) {
+            try {
+                Write-Output "Trying cost retrieval method 1: REST API..."
+                
+                # Get token for ARM
+                $token = (Get-AzAccessToken -ResourceUrl "https://management.azure.com/").Token
+                $subscriptionId = $sub.Id
+                
+                # Format dates properly
+                $fromDate = $startDate.ToString("yyyy-MM-dd")
+                $toDate = $now.ToString("yyyy-MM-dd")
+                
+                # Build request URL for cost data
+                $apiVersion = "2023-03-01"
+                $url = "https://management.azure.com/subscriptions/$subscriptionId/providers/Microsoft.CostManagement/query?api-version=$apiVersion"
+                
+                # Build the request body
+                $body = @{
+                    type = "Usage"
+                    timeframe = "Custom"
+                    timePeriod = @{
+                        from = $fromDate
+                        to = $toDate
+                    }
+                    dataset = @{
+                        granularity = "None"
+                        aggregation = @{
+                            totalCost = @{
+                                name = "PreTaxCost"
+                                function = "Sum"
+                            }
+                        }
+                    }
+                }
+                
+                # Convert body to JSON
+                $bodyJson = $body | ConvertTo-Json -Depth 10
+                
+                # Set headers
+                $headers = @{
+                    "Authorization" = "Bearer $token"
+                    "Content-Type" = "application/json"
+                }
+                
+                # Make the API call
+                $response = Invoke-RestMethod -Uri $url -Method Post -Body $bodyJson -Headers $headers
+                
+                if ($response.properties.rows -and $response.properties.rows.Count -gt 0) {
+                    $totalCost = $response.properties.rows[0][0]
+                    Write-Output "Successfully retrieved cost data via REST API: $totalCost"
+                    $costRetrievalSuccessful = $true
+                } else {
+                    Write-Output "No cost data found in REST API response"
+                }
+            } catch {
+                Write-Output "REST API cost retrieval failed: $_"
+                if ($_.Exception.Response) {
+                    $statusCode = $_.Exception.Response.StatusCode.value__
+                    Write-Output "Status code: $statusCode"
+                }
+            }
+        }
+        
+        # Method 2: Traditional PowerShell cmdlet (works better for EA)
+        if (-not $costRetrievalSuccessful) {
+            try {
+                Write-Output "Trying cost retrieval method 2: PowerShell cmdlet with explicit dates..."
+                
+                $formattedStartDate = Get-Date $startDate -Format "yyyy-MM-dd"
+                $formattedEndDate = Get-Date $now -Format "yyyy-MM-dd"
+                
+                $costParams = @{
+                    StartDate = $formattedStartDate
+                    EndDate = $formattedEndDate
+                    ErrorAction = "Stop"
+                }
+                
+                $costDetails = Get-AzConsumptionUsageDetail @costParams
+                
+                if ($costDetails -and $costDetails.Count -gt 0) {
+                    $totalCost = $costDetails | Measure-Object -Property PretaxCost -Sum | Select-Object -ExpandProperty Sum
+                    Write-Output "Successfully retrieved cost data via PowerShell cmdlet: $totalCost"
+                    $costRetrievalSuccessful = $true
+                } else {
+                    Write-Output "No cost data found using PowerShell cmdlet"
+                }
+            } catch {
+                Write-Output "PowerShell cmdlet cost retrieval failed: $_"
+            }
+        }
+        
+        # Method 3: Azure Resource Manager API (another alternative approach)
+        if (-not $costRetrievalSuccessful) {
+            try {
+                Write-Output "Trying cost retrieval method 3: Azure Resource Manager API..."
+                
+                # Get token for ARM if not already obtained
+                if (-not $token) {
+                    $token = (Get-AzAccessToken -ResourceUrl "https://management.azure.com/").Token
+                    $subscriptionId = $sub.Id
+                }
+                
+                # Different API endpoint and format
+                $resourceCostUrl = "https://management.azure.com/subscriptions/$subscriptionId/providers/Microsoft.CostManagement/dimensions?api-version=2023-03-01"
+                
+                # Set headers
+                $headers = @{
+                    "Authorization" = "Bearer $token"
+                    "Content-Type" = "application/json"
+                }
+                
+                # First get dimensions to confirm API access
+                $dimensionsResponse = Invoke-RestMethod -Uri $resourceCostUrl -Method Get -Headers $headers
+                
+                # Then try a simpler query
+                $simpleQueryUrl = "https://management.azure.com/subscriptions/$subscriptionId/providers/Microsoft.Consumption/usageDetails?api-version=2019-10-01&`$filter=properties/usageStart ge '$fromDate' and properties/usageEnd le '$toDate'"
+                $usageResponse = Invoke-RestMethod -Uri $simpleQueryUrl -Method Get -Headers $headers
+                
+                if ($usageResponse.value -and $usageResponse.value.Count -gt 0) {
+                    $totalCost = ($usageResponse.value | ForEach-Object { $_.properties.pretaxCost } | Measure-Object -Sum).Sum
+                    Write-Output "Successfully retrieved cost data via Resource Manager API: $totalCost"
+                    $costRetrievalSuccessful = $true
+                } else {
+                    Write-Output "No cost data found using Resource Manager API"
+                }
+            } catch {
+                Write-Output "Resource Manager API cost retrieval failed: $_"
+                if ($_.Exception.Response) {
+                    $statusCode = $_.Exception.Response.StatusCode.value__
+                    Write-Output "Status code: $statusCode"
+                }
+            }
+        }
+        
+        # Method 4: CSP-specific Billing API approach
+        if (-not $costRetrievalSuccessful) {
+            try {
+                Write-Output "Trying cost retrieval method 4: CSP Billing API..."
+                
+                # Get token for ARM if not already obtained
+                if (-not $token) {
+                    $token = (Get-AzAccessToken -ResourceUrl "https://management.azure.com/").Token
+                    $subscriptionId = $sub.Id
+                }
+                
+                # Set headers if not already set
+                if (-not $headers) {
+                    $headers = @{
+                        "Authorization" = "Bearer $token"
+                        "Content-Type" = "application/json"
+                    }
+                }
+                
+                # Format dates with time component for billing API
+                $fromDate = $startDate.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                $toDate = $now.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                
+                # Build request URL for the Microsoft.Billing API endpoint
+                $apiVersion = "2020-05-01"
+                $url = "https://management.azure.com/subscriptions/$subscriptionId/providers/Microsoft.Billing/billingPeriods?api-version=$apiVersion"
+                
+                Write-Output "Getting billing periods..."
+                
+                # First get billing periods
+                $billingPeriodsResponse = Invoke-RestMethod -Uri $url -Method Get -Headers $headers -ErrorAction Stop
+                
+                if ($billingPeriodsResponse.value -and $billingPeriodsResponse.value.Count -gt 0) {
+                    # Get the most recent billing period
+                    $billingPeriod = $billingPeriodsResponse.value | Select-Object -First 1
+                    $billingPeriodName = $billingPeriod.name
+                    
+                    Write-Output "Latest billing period: $billingPeriodName"
+                    
+                    # Now query usage details for this billing period
+                    $usageUrl = "https://management.azure.com/subscriptions/$subscriptionId/providers/Microsoft.Billing/billingPeriods/$billingPeriodName/providers/Microsoft.Consumption/usageDetails?api-version=2019-10-01"
+                    
+                    $usageResponse = Invoke-RestMethod -Uri $usageUrl -Method Get -Headers $headers -ErrorAction Stop
+                    
+                    if ($usageResponse.value -and $usageResponse.value.Count -gt 0) {
+                        # Calculate total cost
+                        $periodUsage = $usageResponse.value | Where-Object { 
+                            $_.properties.usageStart -ge $startDate -and 
+                            $_.properties.usageEnd -le $now 
+                        }
+                        
+                        if ($periodUsage) {
+                            $totalCost = ($periodUsage | ForEach-Object { 
+                                [double]$_.properties.pretaxCost 
+                            } | Measure-Object -Sum).Sum
+                            
+                            Write-Output "Successfully retrieved cost data via Billing API: $totalCost"
+                            $costRetrievalSuccessful = $true
+                        } else {
+                            Write-Output "No matching usage data found in the billing period"
+                        }
+                    } else {
+                        Write-Output "No usage data found in Billing API response"
+                    }
+                } else {
+                    Write-Output "No billing periods found"
+                }
+            } catch {
+                Write-Output "CSP Billing API cost retrieval failed: $_"
+                if ($_.Exception.Response) {
+                    $statusCode = $_.Exception.Response.StatusCode.value__
+                    Write-Output "Status code: $statusCode"
+                }
+            }
+        }
+        
+        # If all methods failed, use 0 as fallback
+        if (-not $costRetrievalSuccessful) {
+            Write-Output "All cost retrieval methods failed, using 0 as fallback"
             $totalCost = 0
         }
         
-        # Get budget if available
-        try {
-            $budget = Get-AzConsumptionBudget -ErrorAction Stop | Select-Object -First 1
-            if ($budget) {
-                Write-Output "Found budget: $($budget.Amount) $($budget.TimeGrain)"
-                $budgetAmount = $budget.Amount
-            } else {
-                Write-Output "No budget found"
-                $budgetAmount = $null
+        # Try multiple budget retrieval methods
+        $budgetAmount = $null
+        $budgetRetrievalSuccessful = $false
+        
+        # Method 1: REST API for budget (works for both CSP and EA)
+        if (-not $budgetRetrievalSuccessful) {
+            try {
+                Write-Output "Trying budget retrieval using REST API..."
+                
+                # Get token for ARM if not already obtained
+                if (-not $token) {
+                    $token = (Get-AzAccessToken -ResourceUrl "https://management.azure.com/").Token
+                    $subscriptionId = $sub.Id
+                }
+                
+                # Set headers if not already set
+                if (-not $headers) {
+                    $headers = @{
+                        "Authorization" = "Bearer $token"
+                        "Content-Type" = "application/json"
+                    }
+                }
+                
+                # Build request URL for budget data
+                $budgetUrl = "https://management.azure.com/subscriptions/$subscriptionId/providers/Microsoft.Consumption/budgets?api-version=2023-03-01"
+                
+                # Make the API call
+                $budgetResponse = Invoke-RestMethod -Uri $budgetUrl -Method Get -Headers $headers
+                
+                if ($budgetResponse.value -and $budgetResponse.value.Count -gt 0) {
+                    $budgetAmount = $budgetResponse.value[0].properties.amount
+                    Write-Output "Successfully retrieved budget via REST API: $budgetAmount"
+                    $budgetRetrievalSuccessful = $true
+                } else {
+                    Write-Output "No budget found in REST API response"
+                }
+            } catch {
+                Write-Output "REST API budget retrieval failed: $_"
+                if ($_.Exception.Response) {
+                    $statusCode = $_.Exception.Response.StatusCode.value__
+                    Write-Output "Status code: $statusCode"
+                }
             }
-        } catch {
-            Write-Output "Error retrieving budget: $_"
-            $budgetAmount = $null
+        }
+        
+        # Method 2: Traditional PowerShell cmdlet for budget
+        if (-not $budgetRetrievalSuccessful) {
+            try {
+                Write-Output "Trying budget retrieval using PowerShell cmdlet..."
+                
+                $budget = Get-AzConsumptionBudget -ErrorAction Stop | Select-Object -First 1
+                if ($budget) {
+                    $budgetAmount = $budget.Amount
+                    Write-Output "Successfully retrieved budget via PowerShell cmdlet: $budgetAmount"
+                    $budgetRetrievalSuccessful = $true
+                } else {
+                    Write-Output "No budget found using PowerShell cmdlet"
+                }
+            } catch {
+                Write-Output "PowerShell cmdlet budget retrieval failed: $_"
+            }
         }
         
         # Calculate budget usage
-        $budgetUsed = if ($budget -and $budget.Amount -ne 0) {
-            ($totalCost / $budget.Amount) * 100
+        $budgetUsed = if ($budgetAmount -and $budgetAmount -ne 0) {
+            ($totalCost / $budgetAmount) * 100
         } else {
             $null
         }
         
         # Add to output collection
         $costData += [PSCustomObject]@{
-            TimeGenerated    = $now.ToUniversalTime()
-            Year             = $year
-            Month            = $month
-            SubscriptionName = $sub.Name
-            SubscriptionId   = $sub.Id
-            CostAmount       = $totalCost
-            BudgetAmount     = $budgetAmount
+            TimeGenerated     = $now.ToUniversalTime()
+            Year              = $year
+            Month             = $month
+            SubscriptionName  = $sub.Name
+            SubscriptionId    = $sub.Id
+            ManagementGroup   = $mgmtGroup
+            ManagementGroupPath = $mgmtGroupPath
+            CostAmount        = $totalCost
+            BudgetAmount      = $budgetAmount
             BudgetUsedPercent = $budgetUsed
-            Currency         = "EUR" # Assuming EUR as currency
-            Status           = $sub.State
-            PeriodStart      = $startDate.ToString("yyyy-MM-dd")
-            PeriodEnd        = $now.ToString("yyyy-MM-dd")
+            Currency          = "EUR" # Assuming EUR as currency
+            Status            = $sub.State
+            PeriodStart       = $startDate.ToString("yyyy-MM-dd")
+            PeriodEnd         = $now.ToString("yyyy-MM-dd")
         }
         
-        Write-Output "Added cost data for subscription $($sub.Name): Cost = $totalCost EUR, Budget = $budgetAmount EUR"
+        Write-Output "Added cost data for subscription $($sub.Name): Cost = $totalCost EUR, Budget = $budgetAmount EUR, Management Group = $mgmtGroup"
     }
     catch {
         Write-Error "Error processing subscription $($sub.Name): $_"
     }
+    
+    # Add a small delay between subscriptions to avoid throttling
+    Start-Sleep -Seconds 2
 }
 
 Write-Output "Processed $($costData.Count) subscriptions"

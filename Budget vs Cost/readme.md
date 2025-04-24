@@ -175,7 +175,12 @@ CostManagementData_CL
 CostManagementData_CL
 | where TimeGenerated > ago(90d)
 | summarize arg_max(TimeGenerated, *) by SubscriptionName, Month, Year
-| project SubscriptionName, CostAmount, BudgetAmount, BudgetUsedPercent, Month, Year
+| project SubscriptionName, 
+         CostAmount = round(CostAmount, 0), 
+         BudgetAmount = round(BudgetAmount, 0), 
+         BudgetUsedPercent = round(BudgetUsedPercent, 0), 
+         Month, 
+         Year
 | sort by Year desc, Month desc, CostAmount desc
 ```
 
@@ -186,8 +191,240 @@ CostManagementData_CL
 | where TimeGenerated > ago(7d)
 | where BudgetAmount > 0
 | where CostAmount > BudgetAmount
-| project TimeGenerated, SubscriptionName, CostAmount, BudgetAmount, BudgetUsedPercent
+| summarize arg_max(TimeGenerated, *) by SubscriptionName
+| project SubscriptionName, CostAmount = round(CostAmount, 0), BudgetAmount = round(BudgetAmount, 0), BudgetUsedPercent = round(BudgetUsedPercent, 0)
 | sort by BudgetUsedPercent desc
+```
+
+### Month over Month variance
+```kql
+// Month over month variance for subscriptions in the last 3 months
+let months = 3;
+let data = CostManagementData_CL
+| where TimeGenerated > ago(120d)  // Get enough data to ensure we have 3 months
+| summarize arg_max(TimeGenerated, *) by SubscriptionName, Month, Year
+| extend MonthOrder = case(
+    Month == "January", 1,
+    Month == "February", 2,
+    Month == "March", 3,
+    Month == "April", 4,
+    Month == "May", 5,
+    Month == "June", 6,
+    Month == "July", 7,
+    Month == "August", 8,
+    Month == "September", 9,
+    Month == "October", 10,
+    Month == "November", 11,
+    Month == "December", 12,
+    0
+)
+| extend YearMonth = datetime(strcat(tostring(Year), "-", padleft(tostring(MonthOrder), 2, "0"), "-01"))
+| project SubscriptionName, YearMonth, CostAmount, MonthOrder, Year;
+
+// Get the 3 most recent months in the data
+let latestMonths = data
+| summarize max(YearMonth) by YearMonth
+| top 3 by YearMonth desc
+| project YearMonth;
+
+// Filter data to only include those 3 months
+let filteredData = data
+| where YearMonth in (latestMonths);
+
+// Calculate current month, previous month, and month before previous
+let current = filteredData
+| top 1 by YearMonth desc
+| project CurrentMonth = YearMonth;
+
+let previous = filteredData
+| top 2 by YearMonth desc
+| top 1 by YearMonth asc
+| project PreviousMonth = YearMonth;
+
+let beforePrevious = filteredData
+| top 3 by YearMonth desc
+| top 1 by YearMonth asc
+| project BeforePreviousMonth = YearMonth;
+
+// Join all months together
+filteredData
+| summarize CostAmount = sum(CostAmount) by SubscriptionName, YearMonth
+| extend Month = monthofyear(YearMonth), Year = year(YearMonth)
+| extend MonthName = case(
+    Month == 1, "January",
+    Month == 2, "February",
+    Month == 3, "March",
+    Month == 4, "April",
+    Month == 5, "May",
+    Month == 6, "June",
+    Month == 7, "July",
+    Month == 8, "August",
+    Month == 9, "September",
+    Month == 10, "October",
+    Month == 11, "November",
+    Month == 12, "December",
+    "Unknown"
+)
+| extend MonthYear = strcat(MonthName, " ", Year)
+| summarize CurrentCost = sumif(CostAmount, YearMonth == toscalar(current)),
+            PreviousCost = sumif(CostAmount, YearMonth == toscalar(previous)),
+            BeforePreviousCost = sumif(CostAmount, YearMonth == toscalar(beforePrevious))
+            by SubscriptionName
+| extend 
+    CurrentMonth = monthofyear(toscalar(current)),
+    PreviousMonth = monthofyear(toscalar(previous)),
+    BeforePreviousMonth = monthofyear(toscalar(beforePrevious)),
+    CurrentYear = year(toscalar(current)),
+    PreviousYear = year(toscalar(previous)),
+    BeforePreviousYear = year(toscalar(beforePrevious))
+| extend 
+    CurrentMonthName = case(
+        CurrentMonth == 1, "January",
+        CurrentMonth == 2, "February",
+        CurrentMonth == 3, "March",
+        CurrentMonth == 4, "April",
+        CurrentMonth == 5, "May",
+        CurrentMonth == 6, "June",
+        CurrentMonth == 7, "July",
+        CurrentMonth == 8, "August",
+        CurrentMonth == 9, "September",
+        CurrentMonth == 10, "October",
+        CurrentMonth == 11, "November",
+        CurrentMonth == 12, "December",
+        "Unknown"
+    ),
+    PreviousMonthName = case(
+        PreviousMonth == 1, "January",
+        PreviousMonth == 2, "February",
+        PreviousMonth == 3, "March",
+        PreviousMonth == 4, "April",
+        PreviousMonth == 5, "May",
+        PreviousMonth == 6, "June",
+        PreviousMonth == 7, "July",
+        PreviousMonth == 8, "August",
+        PreviousMonth == 9, "September",
+        PreviousMonth == 10, "October",
+        PreviousMonth == 11, "November",
+        PreviousMonth == 12, "December",
+        "Unknown"
+    ),
+    BeforePreviousMonthName = case(
+        BeforePreviousMonth == 1, "January",
+        BeforePreviousMonth == 2, "February",
+        BeforePreviousMonth == 3, "March",
+        BeforePreviousMonth == 4, "April",
+        BeforePreviousMonth == 5, "May",
+        BeforePreviousMonth == 6, "June",
+        BeforePreviousMonth == 7, "July",
+        BeforePreviousMonth == 8, "August",
+        BeforePreviousMonth == 9, "September",
+        BeforePreviousMonth == 10, "October",
+        BeforePreviousMonth == 11, "November",
+        BeforePreviousMonth == 12, "December",
+        "Unknown"
+    )
+| extend
+    CurrentMonthYear = strcat(CurrentMonthName, " ", CurrentYear),
+    PreviousMonthYear = strcat(PreviousMonthName, " ", PreviousYear),
+    BeforePreviousMonthYear = strcat(BeforePreviousMonthName, " ", BeforePreviousYear)
+| extend 
+    CurrentToPreviousVariance = round(CurrentCost - PreviousCost, 0),
+    PreviousToBeforePreviousVariance = round(PreviousCost - BeforePreviousCost, 0),
+    CurrentToPreviousVariancePct = iif(PreviousCost > 0, round(((CurrentCost - PreviousCost) / PreviousCost) * 100, 1), 0),
+    PreviousToBeforePreviousVariancePct = iif(BeforePreviousCost > 0, round(((PreviousCost - BeforePreviousCost) / BeforePreviousCost) * 100, 1), 0)
+| extend
+    CurrentTrend = case(
+        CurrentToPreviousVariancePct > 10, "↑↑ Significant Increase",
+        CurrentToPreviousVariancePct between (2 .. 10), "↑ Moderate Increase",
+        CurrentToPreviousVariancePct between (-2 .. 2), "→ Stable",
+        CurrentToPreviousVariancePct between (-10 .. -2), "↓ Moderate Decrease",
+        "↓↓ Significant Decrease"
+    ),
+    PreviousTrend = case(
+        PreviousToBeforePreviousVariancePct > 10, "↑↑ Significant Increase",
+        PreviousToBeforePreviousVariancePct between (2 .. 10), "↑ Moderate Increase",
+        PreviousToBeforePreviousVariancePct between (-2 .. 2), "→ Stable",
+        PreviousToBeforePreviousVariancePct between (-10 .. -2), "↓ Moderate Decrease",
+        "↓↓ Significant Decrease"
+    )
+| project 
+    SubscriptionName, 
+    ["Month 3 (Current)"] = CurrentMonthYear,
+    ["Month 3 Cost"] = round(CurrentCost, 0),
+    ["Month 2"] = PreviousMonthYear,
+    ["Month 2 Cost"] = round(PreviousCost, 0),
+    ["Month 1 (Oldest)"] = BeforePreviousMonthYear,
+    ["Month 1 Cost"] = round(BeforePreviousCost, 0),
+    ["M3 to M2 Variance"] = CurrentToPreviousVariance,
+    ["M3 to M2 Variance %"] = CurrentToPreviousVariancePct,
+    ["M3 to M2 Trend"] = CurrentTrend,
+    ["M2 to M1 Variance"] = PreviousToBeforePreviousVariance,
+    ["M2 to M1 Variance %"] = PreviousToBeforePreviousVariancePct,
+    ["M2 to M1 Trend"] = PreviousTrend
+| sort by ["Month 3 Cost"] desc
+
+```
+
+### KQL Queries by Management Group
+### 1. Cost by Management Group Hierarchy
+
+```kql
+CostManagementData_CL
+| where TimeGenerated > ago(90d)
+| where ManagementGroup != "No Data"
+| summarize arg_max(TimeGenerated, *) by SubscriptionName
+| summarize TotalCost = sum(CostAmount), 
+          TotalBudget = sum(BudgetAmount),
+          SubscriptionCount = count()
+  by ManagementGroupPath
+| extend BudgetUtilization = round((TotalCost / TotalBudget) * 100, 0)
+| project ManagementGroupPath, 
+         TotalCost = round(TotalCost, 0), 
+         TotalBudget = round(TotalBudget, 0), 
+         BudgetUtilization,
+         SubscriptionCount
+| sort by TotalCost desc
+```
+
+### 2. Top-level Management Group Spending
+
+```kql
+CostManagementData_CL
+| where TimeGenerated > ago(30d)
+| where ManagementGroup != "No Data"
+| summarize arg_max(TimeGenerated, *) by SubscriptionName
+| extend TopLevelMG = tostring(split(ManagementGroupPath, '/')[0])
+| summarize TotalCost = sum(CostAmount) by TopLevelMG
+| project TopLevelMG, 
+         TotalCost = round(TotalCost, 0)
+| sort by TotalCost desc
+```
+
+### 3. Budget Compliance by Management Group
+
+```kql
+CostManagementData_CL
+| where TimeGenerated > ago(30d)
+| where BudgetAmount > 0
+| summarize arg_max(TimeGenerated, *) by SubscriptionName
+| extend BudgetStatus = case(
+    CostAmount > BudgetAmount, "Over Budget",
+    CostAmount > BudgetAmount * 0.9, "Near Limit",
+    "Under Budget"
+  )
+| summarize OverBudgetCount = countif(BudgetStatus == "Over Budget"),
+           NearLimitCount = countif(BudgetStatus == "Near Limit"),
+           UnderBudgetCount = countif(BudgetStatus == "Under Budget"),
+           TotalSubscriptions = count()
+  by ManagementGroup
+| extend ComplianceRate = round((UnderBudgetCount / TotalSubscriptions) * 100, 0)
+| project ManagementGroup,
+         OverBudgetCount,
+         NearLimitCount,
+         UnderBudgetCount,
+         TotalSubscriptions,
+         ComplianceRate
+| sort by ComplianceRate asc
 ```
 
 ## Creating Visualizations
