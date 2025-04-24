@@ -16,7 +16,7 @@ param(
     [string]$DataCollectionEndpointName = ""
 )
 
-Write-Host "Configuring subscription-level permissions..." -ForegroundColor Cyan
+Write-Host "Configuring permissions..." -ForegroundColor Cyan
 
 # Get the automation account and its system-assigned identity
 try {
@@ -200,32 +200,98 @@ if ($workspace) {
     }
 }
 
-# Loop through each subscription and assign Cost Management Reader role
-foreach ($subscription in $subscriptions) {
-    Write-Host "Processing subscription: $($subscription.Name) ($($subscription.Id))" -ForegroundColor Cyan
+# Get the tenant ID from the current context
+$tenantId = (Get-AzContext).Tenant.Id
+
+# Assign Management Group Reader role at tenant level
+Write-Host "Attempting to assign Management Group Reader role at tenant root level..." -ForegroundColor Cyan
+$mgmtGroupReaderAssigned = $false
+
+try {
+    # Check if role is already assigned at tenant level
+    $existingMgmtGroupReaderRole = Get-AzRoleAssignment -ObjectId $systemIdentityPrincipalId `
+                                                       -RoleDefinitionName "Management Group Reader" `
+                                                       -Scope "/providers/Microsoft.Management/managementGroups/$tenantId" `
+                                                       -ErrorAction SilentlyContinue
     
-    # Set context to current subscription
-    Set-AzContext -SubscriptionId $subscription.Id | Out-Null
-    
-    # Assign Cost Management Reader role at subscription level to system-assigned identity
-    try {
-        # Check if role is already assigned
-        $existingRoleAssignment = Get-AzRoleAssignment -ObjectId $systemIdentityPrincipalId -RoleDefinitionName "Cost Management Reader" -Scope "/subscriptions/$($subscription.Id)" -ErrorAction SilentlyContinue
+    if (-not $existingMgmtGroupReaderRole) {
+        # Create new role assignment at tenant root level
+        Write-Host "  Assigning Management Group Reader role at tenant root level..." -ForegroundColor Yellow
+        New-AzRoleAssignment -ObjectId $systemIdentityPrincipalId `
+                            -RoleDefinitionName "Management Group Reader" `
+                            -Scope "/providers/Microsoft.Management/managementGroups/$tenantId" | Out-Null
         
-        if (-not $existingRoleAssignment) {
-            # Create new role assignment
-            Write-Host "  Assigning Cost Management Reader role..." -ForegroundColor Yellow
-            New-AzRoleAssignment -ObjectId $systemIdentityPrincipalId `
-                                -RoleDefinitionName "Cost Management Reader" `
-                                -Scope "/subscriptions/$($subscription.Id)" | Out-Null
+        Write-Host "  Management Group Reader role assigned successfully at tenant level" -ForegroundColor Green
+        $mgmtGroupReaderAssigned = $true
+    } else {
+        Write-Host "  Management Group Reader role is already assigned at tenant level" -ForegroundColor Yellow
+        $mgmtGroupReaderAssigned = $true
+    }
+} catch {
+    Write-Host "  Could not assign Management Group Reader role at tenant level: $_" -ForegroundColor Yellow
+    Write-Host "  The script will continue, but management group detection in the runbook might be limited." -ForegroundColor Yellow
+}
+
+# Try to assign Cost Management Reader role at tenant root level first
+Write-Host "Attempting to assign Cost Management Reader role at tenant root level..." -ForegroundColor Cyan
+$tenantRoleAssignmentSuccess = $false
+
+try {
+    # Check if role is already assigned at tenant level
+    $existingRoleAssignment = Get-AzRoleAssignment -ObjectId $systemIdentityPrincipalId `
+                                                  -RoleDefinitionName "Cost Management Reader" `
+                                                  -Scope "/providers/Microsoft.Management/managementGroups/$tenantId" `
+                                                  -ErrorAction SilentlyContinue
+    
+    if (-not $existingRoleAssignment) {
+        # Create new role assignment at tenant root level
+        Write-Host "  Assigning Cost Management Reader role at tenant root level..." -ForegroundColor Yellow
+        New-AzRoleAssignment -ObjectId $systemIdentityPrincipalId `
+                            -RoleDefinitionName "Cost Management Reader" `
+                            -Scope "/providers/Microsoft.Management/managementGroups/$tenantId" | Out-Null
+        
+        Write-Host "  Cost Management Reader role assigned successfully at tenant level" -ForegroundColor Green
+        $tenantRoleAssignmentSuccess = $true
+    } else {
+        Write-Host "  Cost Management Reader role is already assigned at tenant level" -ForegroundColor Yellow
+        $tenantRoleAssignmentSuccess = $true
+    }
+} catch {
+    Write-Host "  Could not assign Cost Management Reader role at tenant level: $_" -ForegroundColor Yellow
+    Write-Host "  Will fall back to subscription-level assignments..." -ForegroundColor Yellow
+}
+
+# If tenant-level assignment failed, fall back to subscription-by-subscription assignment
+if (-not $tenantRoleAssignmentSuccess) {
+    Write-Host "Falling back to subscription-level role assignments..." -ForegroundColor Cyan
+    
+    # Loop through each subscription and assign Cost Management Reader role
+    foreach ($subscription in $subscriptions) {
+        Write-Host "Processing subscription: $($subscription.Name) ($($subscription.Id))" -ForegroundColor Cyan
+        
+        # Set context to current subscription
+        Set-AzContext -SubscriptionId $subscription.Id | Out-Null
+        
+        # Assign Cost Management Reader role at subscription level to system-assigned identity
+        try {
+            # Check if role is already assigned
+            $existingRoleAssignment = Get-AzRoleAssignment -ObjectId $systemIdentityPrincipalId -RoleDefinitionName "Cost Management Reader" -Scope "/subscriptions/$($subscription.Id)" -ErrorAction SilentlyContinue
             
-            Write-Host "  Cost Management Reader role assigned successfully" -ForegroundColor Green
-        } else {
-            Write-Host "  Cost Management Reader role is already assigned" -ForegroundColor Yellow
+            if (-not $existingRoleAssignment) {
+                # Create new role assignment
+                Write-Host "  Assigning Cost Management Reader role..." -ForegroundColor Yellow
+                New-AzRoleAssignment -ObjectId $systemIdentityPrincipalId `
+                                    -RoleDefinitionName "Cost Management Reader" `
+                                    -Scope "/subscriptions/$($subscription.Id)" | Out-Null
+                
+                Write-Host "  Cost Management Reader role assigned successfully" -ForegroundColor Green
+            } else {
+                Write-Host "  Cost Management Reader role is already assigned" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Error "  Error assigning Cost Management Reader role in subscription $($subscription.Name): $_"
+            Write-Host "  Warning: The system-assigned identity won't have access to cost data for this subscription." -ForegroundColor Yellow
         }
-    } catch {
-        Write-Error "  Error assigning Cost Management Reader role in subscription $($subscription.Name): $_"
-        Write-Host "  Warning: The system-assigned identity won't have access to cost data for this subscription." -ForegroundColor Yellow
     }
 }
 
@@ -234,7 +300,16 @@ Set-AzContext -Context $originalContext | Out-Null
 
 Write-Host "Role assignment configuration completed!" -ForegroundColor Green
 Write-Host "The system-assigned identity now has:" -ForegroundColor Cyan
-Write-Host "  - Cost Management Reader role on all subscriptions" -ForegroundColor Cyan
+if ($mgmtGroupReaderAssigned) {
+    Write-Host "  - Management Group Reader role at the tenant root level" -ForegroundColor Cyan
+} else {
+    Write-Host "  - Limited management group visibility (Management Group Reader role could not be assigned)" -ForegroundColor Yellow
+}
+if ($tenantRoleAssignmentSuccess) {
+    Write-Host "  - Cost Management Reader role at the tenant root level (inherited by all subscriptions)" -ForegroundColor Cyan
+} else {
+    Write-Host "  - Cost Management Reader role on individual subscriptions" -ForegroundColor Cyan
+}
 if ($workspace) {
     Write-Host "  - Log Analytics Contributor and Reader roles on workspace: $($workspace.Name)" -ForegroundColor Cyan
 }
