@@ -54,66 +54,341 @@ foreach ($sub in $subs) {
     # Initialize management group variables with default values
     $mgmtGroup = "No Data"
     $mgmtGroupPath = "No Data"
+    $foundSubscription = $false
     
     # Get management group information for this subscription
     try {
         Write-Output "Getting management group for subscription: $($sub.Name)"
         
-        # First, try to get the management groups the subscription is directly assigned to
-        $subDetail = Get-AzSubscription -SubscriptionId $sub.Id -ErrorAction SilentlyContinue
-        $mgmtGroupId = $subDetail.ManagedByTenants.TenantId
-        
-        if ($mgmtGroupId) {
-            Write-Output "Found management group ID: $mgmtGroupId"
+        # Method 1: Direct REST API approach using getEntityParents
+        try {
+            Write-Output "Trying method 1: Direct REST API using getEntityParents..."
             
+            $token = (Get-AzAccessToken -ResourceUrl "https://management.azure.com/").Token
+            $headers = @{
+                "Authorization" = "Bearer $token"
+                "Content-Type" = "application/json"
+            }
+            
+            $apiVersion = "2020-02-01"
+            $parentUrl = "https://management.azure.com/subscriptions/$($sub.Id)/providers/Microsoft.Management/getEntityParents?api-version=$apiVersion"
+            
+            $parentResponse = Invoke-RestMethod -Uri $parentUrl -Method Post -Headers $headers -ErrorAction Stop
+            
+            if ($parentResponse.value -and $parentResponse.value.Count -gt 0) {
+                # Extract management group info
+                $mgParent = $parentResponse.value | Where-Object { $_.type -eq 'Microsoft.Management/managementGroups' } | Select-Object -First 1
+                
+                if ($mgParent) {
+                    try {
+                        # Get more details about the management group
+                        $mgDetail = Get-AzManagementGroup -GroupId $mgParent.name -ErrorAction Stop
+                        $mgmtGroup = $mgDetail.DisplayName
+                        $mgmtGroupPath = $mgDetail.DisplayName
+                        $foundSubscription = $true
+                        Write-Output "Found management group via REST API (method 1): $mgmtGroup"
+                    } catch {
+                        # If we can't get the group details, use what we have from the REST API
+                        if ($mgParent.properties.displayName) {
+                            $mgmtGroup = $mgParent.properties.displayName
+                            $mgmtGroupPath = $mgParent.properties.displayName
+                            $foundSubscription = $true
+                            Write-Output "Found management group via REST API (method 1, using properties): $mgmtGroup"
+                        }
+                    }
+                }
+            } else {
+                Write-Output "No parent entities found via REST API"
+            }
+        } catch {
+            Write-Output "Method 1 (REST API) failed: $_"
+        }
+        
+        # Method 2: Try with IncludeManagementGroupId parameter if available (for newer Az module versions)
+        if (-not $foundSubscription) {
             try {
-                # Try to get details of this management group
-                $mgmtGroupDetail = Get-AzManagementGroup -GroupId $mgmtGroupId -ErrorAction SilentlyContinue
-                if ($mgmtGroupDetail) {
-                    $mgmtGroup = $mgmtGroupDetail.DisplayName
-                    $mgmtGroupPath = $mgmtGroupDetail.DisplayName
-                    Write-Output "Found management group: $mgmtGroup"
+                Write-Output "Trying method 2: Get-AzSubscription with IncludeManagementGroupId..."
+                
+                # Check if the parameter exists before trying to use it
+                $cmdletInfo = Get-Command Get-AzSubscription -ErrorAction Stop
+                $hasIncludeMgParam = $cmdletInfo.Parameters.Keys -contains "IncludeManagementGroupId"
+                
+                if ($hasIncludeMgParam) {
+                    $mgSubscription = Get-AzSubscription -SubscriptionId $sub.Id -IncludeManagementGroupId -ErrorAction Stop
+                    
+                    if ($mgSubscription.ManagedByTenants -and $mgSubscription.ManagedByTenants.Count -gt 0) {
+                        $mgmtGroupId = $mgSubscription.ManagedByTenants[0].TenantId
+                        
+                        if ($mgmtGroupId) {
+                            try {
+                                $mgmtGroupDetail = Get-AzManagementGroup -GroupId $mgmtGroupId -ErrorAction Stop
+                                if ($mgmtGroupDetail) {
+                                    $mgmtGroup = $mgmtGroupDetail.DisplayName
+                                    $mgmtGroupPath = $mgmtGroupDetail.DisplayName
+                                    $foundSubscription = $true
+                                    Write-Output "Found management group (method 2): $mgmtGroup"
+                                }
+                            } catch {
+                                Write-Output "Method 2 error getting management group details: $_"
+                            }
+                        }
+                    }
+                } else {
+                    Write-Output "IncludeManagementGroupId parameter not available in this Az.Resources version"
                 }
             } catch {
-                Write-Output "Error getting management group details: $_"
+                Write-Output "Method 2 failed: $_"
             }
-        } else {
-            # Alternative approach - list all subscriptions in all management groups
+        }
+        
+        # Method 3: Try searching in all Management Groups
+        if (-not $foundSubscription) {
             try {
-                # Get root management group first
-                $rootGroup = Get-AzManagementGroup -ErrorAction SilentlyContinue | 
-                    Where-Object { $_.Name -eq "Tenant Root Group" -or $_.Name -eq $sub.TenantId }
+                Write-Output "Trying method 3: Search in all Management Groups..."
                 
-                if ($rootGroup) {
-                    # Then check all management groups
-                    $allGroups = Get-AzManagementGroup -Expand -Recurse -ErrorAction SilentlyContinue
-                    
-                    foreach ($group in $allGroups) {
-                        # Look for our subscription ID in the children
-                        $children = Get-AzManagementGroup -GroupId $group.Name -Expand -ErrorAction SilentlyContinue
+                # Get all management groups
+                $allGroups = Get-AzManagementGroup -ErrorAction SilentlyContinue
+                Write-Output "Retrieved $(($allGroups | Measure-Object).Count) management groups for checking"
+                
+                # Process each group to find our subscription
+                foreach ($group in $allGroups) {
+                    try {
+                        Write-Output "  Checking management group: $($group.Name) (Display name: $($group.DisplayName))"
                         
-                        if ($children -and $children.Children) {
-                            $found = $children.Children | Where-Object { 
-                                $_.Type -eq "Microsoft.Management/managementGroups/subscriptions" -and 
-                                $_.Name -eq $sub.Id 
+                        # Get expanded details with children
+                        $expandedGroup = Get-AzManagementGroup -GroupId $group.Name -Expand -ErrorAction SilentlyContinue
+                        
+                        if ($expandedGroup -and $expandedGroup.Children) {
+                            Write-Output "    Group has $($expandedGroup.Children.Count) children"
+                            
+                            # Check each child object
+                            foreach ($child in $expandedGroup.Children) {
+                                # Debug information about child type and name
+                                Write-Output "    Checking child: Type=$($child.Type), Name=$($child.Name)"
+                                
+                                # Direct subscription child
+                                if ($child.Type -like '*subscriptions' -and $child.Name -eq $sub.Id) {
+                                    $mgmtGroup = $expandedGroup.DisplayName
+                                    $mgmtGroupPath = $expandedGroup.DisplayName
+                                    $foundSubscription = $true
+                                    Write-Output "    Found subscription as direct child in management group: $mgmtGroup"
+                                    break
+                                }
                             }
                             
-                            if ($found) {
-                                $mgmtGroup = $group.DisplayName
-                                $mgmtGroupPath = $group.DisplayName
-                                Write-Output "Found management group through children: $mgmtGroup"
+                            # If found, break out of the groups loop
+                            if ($foundSubscription) {
                                 break
                             }
+                        }
+                    } catch {
+                        Write-Output "    Error checking management group $($group.Name): $_"
+                    }
+                }
+                
+                # Method 3b: Try recursively checking each management group (deeper check)
+                if (-not $foundSubscription -and $allGroups -and $allGroups.Count -gt 0) {
+                    Write-Output "  Trying deeper recursive check of management groups..."
+                    
+                    function Find-SubscriptionInGroup {
+                        param (
+                            [Parameter(Mandatory = $true)]
+                            [string]$GroupId,
+                            
+                            [Parameter(Mandatory = $true)]
+                            [string]$SubscriptionId,
+                            
+                            [Parameter(Mandatory = $false)]
+                            [string]$Path = ""
+                        )
+                        
+                        try {
+                            # Get details with expansion
+                            $grp = Get-AzManagementGroup -GroupId $GroupId -Expand -ErrorAction SilentlyContinue
+                            
+                            if (-not $grp -or -not $grp.Children) {
+                                return $null
+                            }
+                            
+                            # Set current path
+                            $currentPath = if ([string]::IsNullOrEmpty($Path)) { 
+                                $grp.DisplayName 
+                            } else { 
+                                "$Path/$($grp.DisplayName)" 
+                            }
+                            
+                            # Check direct children
+                            foreach ($child in $grp.Children) {
+                                if ($child.Type -like '*subscriptions' -and $child.Name -eq $SubscriptionId) {
+                                    return @{
+                                        GroupName = $grp.DisplayName
+                                        Path = $currentPath
+                                    }
+                                }
+                            }
+                            
+                            # Check nested groups
+                            foreach ($child in $grp.Children) {
+                                if ($child.Type -like '*managementGroups') {
+                                    $result = Find-SubscriptionInGroup -GroupId $child.Name -SubscriptionId $SubscriptionId -Path $currentPath
+                                    if ($result) {
+                                        return $result
+                                    }
+                                }
+                            }
+                            
+                            return $null
+                        } catch {
+                            Write-Output "      Error in recursive check of group ${GroupId}: ${_}"
+                            return $null
+                        }
+                    }
+                    
+                    # Try with each top-level management group
+                    foreach ($topGroup in $allGroups) {
+                        Write-Output "    Recursively checking group: $($topGroup.DisplayName)"
+                        $result = Find-SubscriptionInGroup -GroupId $topGroup.Name -SubscriptionId $sub.Id
+                        
+                        if ($result) {
+                            $mgmtGroup = $result.GroupName
+                            $mgmtGroupPath = $result.Path
+                            $foundSubscription = $true
+                            Write-Output "    Found subscription in nested path: $mgmtGroupPath"
+                            break
                         }
                     }
                 }
             } catch {
-                Write-Output "Error searching management groups: $_"
+                Write-Output "Method 3 failed: $_"
             }
         }
         
-        if ($mgmtGroup -eq "No Data") {
-            Write-Output "No management group found for this subscription"
+        # Method 4: Alternative REST API approach for deeply nested hierarchy
+        if (-not $foundSubscription) {
+            try {
+                Write-Output "Trying method 4: Alternative REST API for management group hierarchy..."
+                
+                if (-not $token) {
+                    $token = (Get-AzAccessToken -ResourceUrl "https://management.azure.com/").Token
+                    $headers = @{
+                        "Authorization" = "Bearer $token"
+                        "Content-Type" = "application/json"
+                    }
+                }
+                
+                # Get the tenant ID
+                $tenantId = (Get-AzContext).Tenant.Id
+                
+                # Get the management group hierarchy starting from the root
+                $rootUrl = "https://management.azure.com/providers/Microsoft.Management/managementGroups/$tenantId/descendants?api-version=2020-02-01"
+                
+                $hierarchyResponse = Invoke-RestMethod -Uri $rootUrl -Method Get -Headers $headers -ErrorAction Stop
+                
+                if ($hierarchyResponse.value) {
+                    Write-Output "  Retrieved $($hierarchyResponse.value.Count) management groups in hierarchy"
+                    
+                    # Function to find the subscription's parent in the hierarchy
+                    function Find-SubscriptionParentInHierarchy {
+                        param (
+                            [Array]$Hierarchy,
+                            [string]$SubscriptionId
+                        )
+                        
+                        foreach ($item in $Hierarchy) {
+                            # Check if this group has our subscription as a child
+                            if ($item.children) {
+                                $subChild = $item.children | Where-Object { 
+                                    $_.type -eq 'Microsoft.Management/managementGroups/subscriptions' -and 
+                                    $_.name -eq $SubscriptionId
+                                }
+                                
+                                if ($subChild) {
+                                    return @{
+                                        GroupName = $item.properties.displayName
+                                        Path = $item.properties.displayName
+                                    }
+                                }
+                                
+                                # Recursively check children
+                                if ($item.children | Where-Object { $_.type -eq 'Microsoft.Management/managementGroups' }) {
+                                    $nestedGroups = $item.children | Where-Object { $_.type -eq 'Microsoft.Management/managementGroups' }
+                                    foreach ($nested in $nestedGroups) {
+                                        $nestedItems = $Hierarchy | Where-Object { $_.name -eq $nested.name }
+                                        foreach ($nestedItem in $nestedItems) {
+                                            $result = Find-SubscriptionParentInHierarchy -Hierarchy @($nestedItem) -SubscriptionId $SubscriptionId
+                                            if ($result) {
+                                                return @{
+                                                    GroupName = $result.GroupName
+                                                    Path = "$($item.properties.displayName)/$($result.Path)"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return $null
+                    }
+                    
+                    $result = Find-SubscriptionParentInHierarchy -Hierarchy $hierarchyResponse.value -SubscriptionId $sub.Id
+                    if ($result) {
+                        $mgmtGroup = $result.GroupName
+                        $mgmtGroupPath = $result.Path
+                        $foundSubscription = $true
+                        Write-Output "  Found subscription in management group via hierarchy: $mgmtGroupPath"
+                    }
+                } else {
+                    Write-Output "  No management group hierarchy found"
+                }
+            } catch {
+                Write-Output "Method 4 failed: $_"
+            }
+        }
+        
+        # Final check - try Management Group API directly for the subscription
+        if (-not $foundSubscription) {
+            try {
+                Write-Output "Trying final method: Direct Management Group API for subscription..."
+                
+                if (-not $token) {
+                    $token = (Get-AzAccessToken -ResourceUrl "https://management.azure.com/").Token
+                    $headers = @{
+                        "Authorization" = "Bearer $token"
+                        "Content-Type" = "application/json"
+                    }
+                }
+                
+                # Try to get management group directly for the subscription
+                $directUrl = "https://management.azure.com/subscriptions/$($sub.Id)?api-version=2022-12-01"
+                
+                $subResponse = Invoke-RestMethod -Uri $directUrl -Method Get -Headers $headers -ErrorAction Stop
+                
+                if ($subResponse.managementGroupId) {
+                    $mgId = $subResponse.managementGroupId
+                    Write-Output "  Found management group ID from subscription API: $mgId"
+                    
+                    try {
+                        $mgDetail = Get-AzManagementGroup -GroupId $mgId -ErrorAction Stop
+                        if ($mgDetail) {
+                            $mgmtGroup = $mgDetail.DisplayName
+                            $mgmtGroupPath = $mgDetail.DisplayName
+                            $foundSubscription = $true
+                            Write-Output "  Found management group details: $mgmtGroup"
+                        }
+                    } catch {
+                        Write-Output "  Error getting management group details for ID ${mgId}: $_"
+                    }
+                } else {
+                    Write-Output "  No management group ID found in subscription properties"
+                }
+            } catch {
+                Write-Output "Final method failed: $_"
+            }
+        }
+        
+        # Final check if we found anything
+        if (-not $foundSubscription) {
+            Write-Output "No management group found for this subscription after trying all methods"
         }
     } catch {
         Write-Output "Error retrieving management group (continuing anyway): $_"
