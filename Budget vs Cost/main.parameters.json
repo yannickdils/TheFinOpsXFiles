@@ -6,7 +6,8 @@
       "value": "westeurope"
     },
     "tags": {
-      "value": {}
+      "value": {
+     }
     },
     "resourceGroupName": {
       "value": "rg-management-hub-finops-weu-001"

@@ -1,0 +1,111 @@
+{
+    "version": "Notebook/1.0",
+    "items": [
+      {
+        "type": 3,
+        "content": {
+          "version": "KqlItem/1.0",
+          "query": "CostManagementData_CL\r\n| where TimeGenerated > ago(90d)\r\n| summarize arg_max(TimeGenerated, *) by SubscriptionName, Month, Year\r\n| project SubscriptionName, \r\n         CostAmount = round(CostAmount, 0), \r\n         BudgetAmount = round(BudgetAmount, 0), \r\n         BudgetUsedPercent = round(BudgetUsedPercent, 0), \r\n         Month, \r\n         Year\r\n| sort by Year desc, Month desc, CostAmount desc",
+          "size": 0,
+          "title": "Monthly Costs by Subscription",
+          "timeContext": {
+            "durationMs": 86400000
+          },
+          "showExportToExcel": true,
+          "queryType": 0,
+          "resourceType": "microsoft.operationalinsights/workspaces",
+          "crossComponentResources": [
+            "/subscriptions/<subscriptionID>/resourceGroups/rg-management-hub-finops-weu-001/providers/Microsoft.OperationalInsights/workspaces/log-management-hub-finops-weu-001"
+          ]
+        },
+        "name": "Monthly Costs by Subscription"
+      },
+      {
+        "type": 3,
+        "content": {
+          "version": "KqlItem/1.0",
+          "query": "CostManagementData_CL\r\n| where TimeGenerated > ago(7d)\r\n| where BudgetAmount > 0\r\n| where CostAmount > BudgetAmount\r\n| summarize arg_max(TimeGenerated, *) by SubscriptionName\r\n| project SubscriptionName, CostAmount = round(CostAmount, 0), BudgetAmount = round(BudgetAmount, 0), BudgetUsedPercent = round(BudgetUsedPercent, 0)\r\n| sort by BudgetUsedPercent desc",
+          "size": 0,
+          "title": "Subscriptions over budget",
+          "timeContext": {
+            "durationMs": 86400000
+          },
+          "showExportToExcel": true,
+          "queryType": 0,
+          "resourceType": "microsoft.operationalinsights/workspaces",
+          "crossComponentResources": [
+            "/subscriptions/<subscriptionID>/resourceGroups/rg-management-hub-finops-weu-001/providers/Microsoft.OperationalInsights/workspaces/log-management-hub-finops-weu-001"
+          ]
+        },
+        "name": "Subscriptions over budget"
+      },
+      {
+        "type": 3,
+        "content": {
+          "version": "KqlItem/1.0",
+          "query": "// Roll-up of Cost per Management Group\r\n// Aggregates costs across all subscriptions grouped by management group\r\nCostManagementData_CL\r\n| where TimeGenerated > ago(90d)\r\n| where ManagementGroup != \"No Data\"\r\n| summarize arg_max(TimeGenerated, *) by SubscriptionId, ManagementGroup\r\n| summarize \r\n    TotalCost = sum(CostAmount),\r\n    TotalBudget = sum(BudgetAmount),\r\n    SubscriptionCount = count(),\r\n    AvgBudgetUtilization = (sum(CostAmount) / sum(BudgetAmount)) * 100\r\n  by ManagementGroup\r\n| extend BudgetStatus = case(\r\n    AvgBudgetUtilization > 100, \"⚠️ Over Budget\",\r\n    AvgBudgetUtilization > 85, \"⚡ Near Limit\",\r\n    \"✓ Under Budget\"\r\n  )\r\n| project \r\n    ManagementGroup, \r\n    SubscriptionCount,\r\n    [\"Total Cost\"] = round(TotalCost, 0),\r\n    [\"Total Budget\"] = round(TotalBudget, 0),\r\n    [\"Budget Utilization %\"] = round(AvgBudgetUtilization, 1),\r\n    [\"Budget Status\"] = BudgetStatus\r\n| sort by [\"Total Cost\"] desc",
+          "size": 0,
+          "title": "Management Group Budget Status",
+          "timeContext": {
+            "durationMs": 86400000
+          },
+          "queryType": 0,
+          "resourceType": "microsoft.operationalinsights/workspaces",
+          "crossComponentResources": [
+            "/subscriptions/<subscriptionID>/resourceGroups/rg-management-hub-finops-weu-001/providers/Microsoft.OperationalInsights/workspaces/log-management-hub-finops-weu-001"
+          ],
+          "gridSettings": {
+            "sortBy": [
+              {
+                "itemKey": "Budget Status",
+                "sortOrder": 1
+              }
+            ]
+          },
+          "sortBy": [
+            {
+              "itemKey": "Budget Status",
+              "sortOrder": 1
+            }
+          ]
+        },
+        "name": "Management Group Budget Status"
+      },
+      {
+        "type": 3,
+        "content": {
+          "version": "KqlItem/1.0",
+          "query": "// Roll-up of Cost per Subscription\r\n// Provides detailed cost analysis for each subscription\r\nCostManagementData_CL\r\n| where TimeGenerated > ago(90d)\r\n| summarize arg_max(TimeGenerated, *) by SubscriptionId\r\n| extend MonthYear = strcat(Month, \" \", Year)\r\n| extend \r\n    BudgetUtilization = round((CostAmount / BudgetAmount) * 100, 1),\r\n    BudgetStatus = case(\r\n        CostAmount > BudgetAmount, \"⚠️ Over Budget\",\r\n        CostAmount > BudgetAmount * 0.85, \"⚡ Near Limit\",\r\n        \"✓ Under Budget\"\r\n    )\r\n| project \r\n    [\"Subscription Name\"] = SubscriptionName,\r\n    [\"Month/Year\"] = MonthYear,\r\n    [\"Cost\"] = round(CostAmount, 0),\r\n    [\"Budget\"] = round(BudgetAmount, 0),\r\n    [\"Budget Utilization %\"] = BudgetUtilization,\r\n    [\"Status\"] = BudgetStatus\r\n| sort by [\"Cost\"] desc",
+          "size": 0,
+          "title": "Subscription Budget Status",
+          "timeContext": {
+            "durationMs": 86400000
+          },
+          "queryType": 0,
+          "resourceType": "microsoft.operationalinsights/workspaces",
+          "crossComponentResources": [
+            "/subscriptions/<subscriptionID>/resourceGroups/rg-management-hub-finops-weu-001/providers/Microsoft.OperationalInsights/workspaces/log-management-hub-finops-weu-001"
+          ],
+          "gridSettings": {
+            "sortBy": [
+              {
+                "itemKey": "Status",
+                "sortOrder": 1
+              }
+            ]
+          },
+          "sortBy": [
+            {
+              "itemKey": "Status",
+              "sortOrder": 1
+            }
+          ]
+        },
+        "name": "Subscription Budget Status"
+      }
+    ],
+    "fallbackResourceIds": [
+      "azure monitor"
+    ],
+    "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+  }
